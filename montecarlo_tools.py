@@ -560,7 +560,8 @@ def save_samples_and_indices(
 def run_and_collect(
     executable_path: str, 
     flags: List[str], 
-    grid_indices: List[int]
+    grid_indices: List[int],
+    state_of_interest: int,
 ) -> Optional[float]:
     """
     Runs the Fortran executable with specified flags and grid indices, 
@@ -580,6 +581,8 @@ def run_and_collect(
     grid_indices : List[int]
         A list of grid indices (integers) that define the grid point 
         to evaluate in the Fortran executable.
+    state_of_interest : int
+        The state for which the density is to be computed.
 
     Returns
     -------
@@ -598,8 +601,14 @@ def run_and_collect(
     # Run the Fortran executable and collect psi values
     psi_values = run_fortran_executable(executable_path, flags, grid_indices)
     if psi_values is not None:
-        # Calculate the sum of squared absolute values (probability densities)
-        return np.sum(np.abs(psi_values) ** 2)
+        if state_of_interest == -1:
+            # Compute the sum of squared absolute psi values for all states
+            psi_squared = sum(abs(psi)**2 for psi in psi_values)
+        else:
+            # Compute the sum of squared absolute psi values for the specified state
+            psi_squared = abs(psi_values[state_of_interest])**2
+        return psi_squared
+            
     else:
         # Return None if the executable failed
         return None
@@ -753,6 +762,7 @@ def metropolis_worker(
         Callable,          # run_and_collect_fn
         str,               # executable_path
         List[str],         # flags
+        int,               # state_of_interest
         int,               # num_steps
         str,               # boundary
         dict               # shared_cache
@@ -774,6 +784,7 @@ def metropolis_worker(
         - initial_prob (float): The initial probability (density) at the starting position.
         - grid_shape (tuple): The shape of the grid (number of points in each dimension).
         - run_and_collect_fn (Callable): Function to compute the density for a given grid index.
+        - state_of_interest (int): In a multi state system, the state for which the density is to be computed. (-1 for all states)
         - executable_path (str): Path to the executable used for computing densities.
         - flags (list of str): Command-line flags to pass to the executable.
         - num_steps (int): Number of steps the Metropolis algorithm will take.
@@ -796,7 +807,7 @@ def metropolis_worker(
     - The acceptance criterion for a move is based on the ratio of proposed to current density.
 
     """
-    (initial_index, initial_prob, grid_shape, run_and_collect_fn, executable_path, flags, num_steps, boundary, shared_cache) = args
+    (initial_index, initial_prob, grid_shape, run_and_collect_fn, executable_path, flags, state_of_interest, num_steps, boundary, shared_cache) = args
     current_index = initial_index
     current_prob = initial_prob
     samples = [(current_index, current_prob)]  # Store tuples of (position, density)
@@ -817,7 +828,7 @@ def metropolis_worker(
 
         if new_den is None:
             # Compute the new density using the provided function
-            new_den = run_and_collect_fn(executable_path, flags, list(proposed_index))
+            new_den = run_and_collect_fn(executable_path, flags, list(proposed_index),state_of_interest)
             if new_den is None:
                 continue  # Skip if density could not be computed
             cache[proposed_key] = new_den  # Store the new density in the cache
@@ -844,6 +855,7 @@ def metropolis_parallel(
     run_and_collect_fn: Callable,
     executable_path: str,
     flags: List[str],
+    state_of_interest: int,
     num_steps: int,
     boundary: str = 'reflect'
 ) -> List[List[Tuple[np.ndarray, float]]]:
@@ -862,7 +874,7 @@ def metropolis_parallel(
         representing the starting position for a specific walker.
     initial_sp_psi : List[float]
         A list of initial probability densities (psi values) corresponding to each 
-        walker’s starting position.
+        walker's starting position.
     grid_shape : Tuple[int, ...]
         The shape of the grid (number of points in each dimension).
     run_and_collect_fn : Callable
@@ -871,6 +883,8 @@ def metropolis_parallel(
         Path to the Fortran executable that computes psi values.
     flags : List[str]
         Command-line flags to pass to the Fortran executable.
+    state_of_interest : int
+        The state for which the density is to be computed. (-1 for all states)
     num_steps : int
         The number of steps that each walker will take in the Metropolis algorithm.
     boundary : str, optional
@@ -906,6 +920,7 @@ def metropolis_parallel(
             run_and_collect_fn,   # Function to compute density
             executable_path,      # Path to the Fortran executable
             flags,                # Command-line flags
+            state_of_interest,    # Command-line flags
             num_steps,            # Number of Metropolis steps
             boundary,             # Boundary condition ('reflect' or 'periodic')
             shared_cache          # Shared cache for storing computed densities
