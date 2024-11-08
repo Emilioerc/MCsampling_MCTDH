@@ -4,7 +4,7 @@
 !
 ! Converts a psi file from an MCTDH to an exact representation in a 
 ! single point
-! Emilio R.C. 09/2024
+! Emilio R.C. 11/2024
 !***********************************************************************
 
       program sp_psi
@@ -22,7 +22,7 @@
 #include "channels.inc"
 
       integer  dynbytes(4),complexsize,realsize,integersize
-      integer  ilbl,chkdvr,chkgrd,chkpsi,chkdat,chkprp,i,m,f
+      integer  ilbl,chkdvr,chkgrd,chkpsi,chkdat,chkprp,i
       real*8   totmem,thrs
       logical  lerr,lascii,lrst,linwf,lwght
       common /sp_psiin/ thrs,lascii,lrst,lwght
@@ -31,6 +31,7 @@
       real*8    ,allocatable :: mr(:)
       integer   ,allocatable :: mi(:)
       integer   ,allocatable :: rint(:)
+      integer   max_f, current_f, s,m,n,f
 
 
 !-----------------------------------------------------------------------
@@ -114,9 +115,6 @@
       lpsiopt(3)=.false.
       lpsiopt(4)=.false.
       griddim=nstate
-      do m=1,nmode
-         griddim=griddim*subdim(m)
-      enddo
 
       ! Electronic basis: for exact, we always use multi-set (see
       ! EINSBAS). If the incoming WF is single-set, fix it.
@@ -131,8 +129,7 @@
             nspfdof(meb) = nspfdof(meb)-1
          endif
       endif
-      call einexact
-
+      ! call einexact
       call griddat
       call psidat
 
@@ -245,14 +242,28 @@
       
 
 c     Read indexed from the CLI
+c     nmode is the number of mode combinations, but I want the 
+c     number of primitive basis
+! Count the number of DoFs without electronic DoFs
+      current_f = 0
+      max_f = 0
+      do s=1, nstate
+       do m=1, nmode
+        do n=1, nspfdof(m)
+         current_f = spfdof(n, m)
+         if (current_f > max_f) then
+            max_f = current_f
+         end if
+        enddo
+       enddo
+      enddo
+        
+      write(6,*) "Enter the index/es for the ", max_f, "DOFs"
+      allocate(rint(max_f))
+      read(5,*) (rint(i), i=1,max_f)
 
-      write(6,*) "Enter the index/es for the ", nmode, "modes"
-      allocate(rint(nmode))
-      read(5,*) (rint(i), i=1,nmode)
-
-      
-      do i=1, nmode
-         write(6,*) "Index for mode", i, ":", rint(i)
+      do i=1, max_f
+         write(6,*) "Index for DOF", i, ":", rint(i)
       enddo
 
 !-----------------------------------------------------------------------
@@ -260,7 +271,7 @@ c     Read indexed from the CLI
 !-----------------------------------------------------------------------
       call getcpsi(1)
 
-      call subsp_psi(mc(mcpsi),ms(mspsi),rint,
+      call subsp_psi(mc(mcpsi),ms(mspsi),rint,max_f,
      +     mi(mijindx),cdgldim(2),mr(mrort),mr(mrweight),
      +     mr(mrtrafo),mc(mcexphin),mc(mcrueck),mi(mifftfak))
 
@@ -282,7 +293,7 @@ c     Read indexed from the CLI
 !     calculates the exact wavefunction for a single point over time
 !***********************************************************************
 
-      subroutine subsp_psi (psi,spsi,idxs,jindx,dgldim1,
+      subroutine subsp_psi (psi,spsi,idxs,max_f,jindx,dgldim1,
      +                      ort,weight,trafo,exphin,rueck,fftfak)
 
       implicit none
@@ -293,14 +304,13 @@ c     Read indexed from the CLI
 #include "griddat.inc"
 #include "psidef.inc"
 #include "daten.inc"
-#include "compdat.inc"
-#include "compdat1.inc"
 #include "channels.inc"
 
       integer    dgldim1,i,jindx(adim),d,iz,ndof1
       integer    fftfak(fftdim),idum(1),chkdvr,m,n,f,nmode1
       integer    igpoint(maxdim),findx(maxgdim)
-      integer    idxs(nmode), state
+      integer    max_f,s
+      integer    idxs(max_f), state
       real*8     rand_val
       real*8     time,dt,trafo(dvrdim),rdum(1),ort(ortdim)
       real*8     previous,now,spent,fcputime,fsystime,thrs
@@ -354,9 +364,9 @@ c     Read indexed from the CLI
 
 ! --- Loop over wave functions
    10 continue
-!-------------------CALL PSI_P------------
-
-         call psi_sp(psip, spsi, idxs, lrst, ipsi)
+      !-------------------CALL PSI_P------------
+      call psi_sp(psip, spsi, idxs, max_f, lrst, ipsi)
+      !----------------------------------------
       if (lend) goto 77
 
 ! determine actual time and CPU-time spent since last call
@@ -366,10 +376,16 @@ c     Read indexed from the CLI
       now=fcputime(0)+fsystime(0)
       spent=now-previous
       previous=now
-
+      !----------------------------------------
       write(ilog,'(a,f8.3,a,f15.1,f15.2,4x,a16)')
      +     'Writing WF : ',time,' fs, ',now,spent,actual
       call myflush(ilog)
+      !----------------------------------------
+      write(6,*) ""
+      write(6,'(a,f8.3,a)') 'Time : ',time,' fs'
+      do s=1, nstate
+         write(6,*) 'The value of psi for state', s, "is", psip(s)
+      enddo
       call getcsys(2)
       call getcpsi(2)
 ! --- Handle multi-set electronic states
@@ -379,21 +395,11 @@ c     Read indexed from the CLI
 ! "coefficients"
       if(lascii) then
          write(ipsi1,'(1x/,a,f9.4,/)') '# Time =', time
-         i=0
-         do m=1,nmode1
-            do n=1,nspfdof(m)
-               f=spfdof(n,m)
-               i=i+1
-               findx(i) = f
-            enddo
-         enddo
-         ndof1=i  ! this is necessary to remove dummy DOFs    
 
          write(ipsi1,'(a,8x,a,3x,a,4x,a,12x,55(a9,5x))')
      +     '#    Re(WF)','Im(WF)',' abs(WF)',' abs2(WF)',
-     +     (modelabel(findx(i)),i=1,ndof1)
+     +     (modelabel(i),i=1,max_f)
          
-
          call initvxi(igpoint,maxdim) ! Set igpoint(i)=1
          igpoint(1)=0
                
@@ -414,27 +420,27 @@ c     Read indexed from the CLI
   15     continue
 ! ---    remove weights from WF if required
          if(lwght) then   ! if(findx(i).ne.feb) then
-            do i=1,ndof1
-               if(findx(i).ne.feb) then
+            do i=1,max_f
+               if(i .ne.feb) then
                   psip(2) = psip(2)/
-     +            weight(zort(findx(i))+idxs(i)-1)
+     +            weight(zort(i)+idxs(i)-1)
                endif
             enddo
          endif
+!-------------------------------------------------
 ! ---    write WF and grid points
-                  ! write(6,*) "Here"
          do state=1,nstate
             write(ipsi1,996) psip(state),cdabs(psip(state)), 
      +           cdabs(psip(state))**2,
-     +           (ort(zort(findx(i))+idxs(i)-1),i=1,ndof1)
+     +           (ort(zort(i)+idxs(i)-1),i=1,max_f)
          enddo
       else    ! not ascii
             do state=1,nstate
                write(ipsi1) psip(state),cdabs(psip(state)), 
      +              cdabs(psip(state))**2,
-     +             (ort(zort(findx(i))+idxs(i)-1),i=1,ndof1)
+     +             (ort(zort(i)+idxs(i)-1),i=1,max_f)
             enddo
-         endif
+      endif
          
 
       time=time + dt
@@ -485,8 +491,8 @@ c     Read indexed from the CLI
 #include "griddat.inc"
 #include "psidef.inc"
 #include "daten.inc"
-#include "compdat.inc"
-#include "compdat1.inc"
+! #include "compdat.inc"
+! #include "compdat1.inc"
 #include "channels.inc"
 
       integer        iarg, myiargc, ierr,i
