@@ -254,7 +254,7 @@ C***********************************************************************
 ! 
 ! EMILIO R.C. 09/2024
 !***********************************************************************
-      subroutine psi_sp(psi_value, psi, grid_indices, lrst, unit)
+      subroutine psi_sp(psi_value,psi,grid_indices,dim_idx,lrst, unit)
 
       implicit none
 
@@ -265,22 +265,21 @@ C***********************************************************************
 #include "griddat.inc"
 #include "psidef.inc"
 #include "daten.inc"
-#include "compdat.inc"
-#include "compdat1.inc"
 
    ! Declare parameters and variables
       integer unit
       logical lrst
-      integer grid_indices(nmode)
+      integer dim_idx
+      integer grid_indices(dim_idx)
       complex*8  spsi(dgldim)
       complex*16 psi_value(nstate)
       complex*16 psi(dgldim)
       complex*16 workc(dgldim+2*(griddim/nstate))
 
    ! Local variables
-      integer m, s, i, idx, config_index
+      integer s,m,n,f, i, idx, config_index,b
       integer jindx(adim), spf_start, a_start
-      integer spf_indices(nmode)
+      integer spf_indices(nmode),lin_idx(nmode),stride
       complex*16 spf_values(nmode, maxspf)
       complex*16 a_coeff, product
       integer total_configs
@@ -288,135 +287,44 @@ C***********************************************************************
       integer indices(nmode)
       complex*16 psi_work(dgldim)
 
-   ! Initialize psi_value to zero
-      do s = 1, nstate
-         psi_value(s) = (0.0d0, 0.0d0)
-      end do
-
    ! Read the wavefunction into psi
       if(lrst) then
          read(unit,err=999) (workc(i),i=1,dgldim)
       else
          call rdpsi(unit,workc,spsi,jindx)
       endif
-
-   ! Loop over states
+      ! Loop over states
       do s = 1, nstate
-   ! Extract SPF values at the specified grid indices for state 's'
-         do m = 1, nmode
-         spf_start = zetf(m, s)
-   ! Ensure grid index is within valid range
-         if (grid_indices(m) < 1 .or. grid_indices(m) > subdim(m)) then
-            write(6,*) "Error: grid_indices(", m, ") out of bounds."
-            stop
-         endif
-         do i = 1, dim(m, s)
-   ! Calculate the index for the i-th SPF at the specific grid point
-            idx = spf_start + (i-1)*subdim(m) + grid_indices(m) - 1
-            spf_values(m, i) = workc(idx)
-         end do
-         end do
 
-   ! Compute the wf value for state s
-         psi_value(s) = (0.0d0, 0.0d0)
-   ! Set number of A-vec coeff for state s
-         total_configs = block(s)
+         psi_value(s) = (1.0d0, 0.0d0) ! Initialize psi_value to zero
+         a_coeff = (0.0d0, 0.0d0)
 
-   ! Loop over A-vector
-         a_start = zpsi(s)
-         do config_index = 1, total_configs
-         idx = a_start + config_index - 1
-         a_coeff = workc(idx)
+         ! Loop over A-vector coefficients
+         do b = zpsi(s), zpsi(s) + block(s) - 1
+            a_coeff = a_coeff + workc(b)
+         end do ! Loop over A-vector coefficients
 
-   ! Decode the configuration indices
-         call deco_conf(config_index, dim(1:nmode, s), indices)
-
-   ! Compute the product of SPF values for this configuration
-         product = (1.0d0, 0.0d0)
-         do m = 1, nmode
-            i = indices(m)
-            product = product * spf_values(m, i)
-         end do
-
-   ! Accumulate psi_value(s)
-         psi_value(s) = psi_value(s) + a_coeff * product
-         end do
-      end do
-
-   ! Output the value of psi at the grid point
-      do s = 1, nstate
-         write(6, *) 'The value of psi for state ', s
-         write(6, *)  dble(psi_value(s)), dimag(psi_value(s))
-      end do
+         do m = 1, nmode ! Loop over modes
+         ! Initialize the linear index and stride for the mode
+         lin_idx(m) = 1
+         stride = 1
+          do n = 1, nspfdof(m)  ! Loop over dofs
+            f = spfdof(n, m)  ! Index of the dof
+            ! Calculate the linear index for the mode
+            lin_idx(m) = lin_idx(m) + (grid_indices(f) - 1) * stride
+            ! Update the stride for the next dof
+            stride = stride * gdim(f)
+          end do ! Loop over dofs
+          psi_value(s) = psi_value(s) * workc(zetf(m,s) + lin_idx(m))
+         end do ! Loop over modes
+         psi_value(s) = psi_value(s) * a_coeff
+      end do ! Loop over states
 
       return
 
 999   write(6, *) 'ERROR reading wavefunction'
       stop
 
-      end
-
-!***********************************************************************
-!                    decode_configuration
-! Purpose: 
-!   This subroutine converts a 1D linear index (config_index) into 
-!   a set of multidimensional indices (indices) corresponding to 
-!   each mode in an MCTDH wavefunction.
-!
-! Inputs:
-!   config_index - The 1D index representing a configuration.
-!   dima         - An array containing the number of SPFs for each mode.
-!
-! Output:
-!   indices      - The decoded indices corresponding to each mode, 
-!                  based on the configuration index and mode dimensions.
-!
-! Description:
-!   The subroutine works by dividing the linear config_index by the 
-!   product of the mode dimensions of the higher modes and computes the 
-!   remainder, which is used to calculate the indices for the lower modes.
-!
-! EMILIO R.C. 09/2024
-!***********************************************************************
-
-      subroutine deco_conf(config_index, dima, indices)
-
-      implicit none
-#include "parameter.inc"
-#include "global.inc"
-#include "aglobal.inc"
-#include "griddat.inc"
-#include "psidef.inc"
-#include "daten.inc"
-#include "compdat.inc"
-#include "compdat1.inc"
-
-      integer config_index
-      integer dima(nmode)
-      integer indices(nmode)
-
-      integer m, remainder, divisor, i
-
-! Initialize the remainder as config_index - 1 
-! because Fortran indices start at 1.
-      remainder = config_index - 1
-
-! Loop over modes, from the last mode to the first (reverse order)
-      do m = nmode, 1, -1
-         divisor = 1
-! Compute the product of dims(m+1), dims(m+2), ..., dims(nmode)
-         if (m .lt. nmode) then
-            do i = m + 1, nmode
-               divisor = divisor * dima(i)
-            end do
-         end if
-! Calculate the index for mode m by dividing remainder by divisor
-         indices(m) = remainder / divisor + 1
-! Update remainder for the next mode by subtracting the part already decoded
-         remainder = remainder - (indices(m) - 1) * divisor
-      end do
-
-      return
       end
 
 
